@@ -1,0 +1,229 @@
+using System;
+using System.Security.Cryptography.X509Certificates;
+using System.Xml.Linq;
+using System.Linq;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Threading;
+using System.Dynamic;
+using System.Security.Authentication;
+
+namespace XmlToXmb2
+{
+    class Program
+    {
+        private enum ValueType
+        {
+            ElementValue = 0,
+            String = 1,
+            Bool = 2,
+            Signed = 3,
+            Unsigned = 4,
+            Float = 5,
+            Double = 6,
+            Float2 = 7,
+            Float3 = 8,
+            Float4 = 9
+        }
+        public static void Main(string[] args)
+        {
+            
+            string filePath = Console.ReadLine();
+            XDocument xmlDoc = XDocument.Parse(LoadXml(filePath));
+            Xmb2Writer(0, xmlDoc);
+        }
+
+        public static string LoadXml(string path) 
+        {
+            string xmlString;
+            using (var streamReader = new StreamReader(@path, Encoding.UTF8)) xmlString = streamReader.ReadToEnd();
+            return xmlString;
+        }
+
+        public static void Xmb2Writer(int size, XDocument xmlDoc) 
+        {
+            var attributeOffsets = new Dictionary<XAttribute, long>();
+            var elementOffsets = new Dictionary<XElement, long>();
+            using (BinaryWriter writer = new BinaryWriter(File.Open("common.exml", FileMode.Create)))
+            {
+                StringToCharConverter(writer, "XMB2");
+                writer.Write(size);
+                writer.Write((ushort)0);
+                writer.Write((ushort)0);
+                writer.Write(4);
+                List<XElement> xElements = xmlDoc.Descendants().ToList();
+                foreach (XElement element in xElements)
+                {
+                    int count = element.Elements().Count();
+                    if (count==0)
+                    {
+                        elementOffsets.Add(element, 0);
+                        writer.Write(0);
+                    }
+                    else
+                    {
+                        var children = element.Elements().ToList();
+                        int a = xElements.IndexOf(children[0]);
+                        int b = xElements.IndexOf(element);
+                        elementOffsets.Add(element, (12*(a-b)));
+                        writer.Write(12 * (a-b));
+                    }
+                    
+                    writer.Write(0);
+                    writer.Write((ushort)count);
+                    writer.Write((byte)0);
+                    writer.Write((byte)element.Attributes().Count());
+                }
+                foreach (XElement element in xElements) 
+                {
+                    string name = element.Name.LocalName;
+                    var attributes = element.Attributes();
+                    if (element.Attributes().Count()!=0)
+                    {
+                        var a2 = element.Attributes().ToList()[0];
+                        attributeOffsets.Add(a2, writer.BaseStream.Position);
+                    }
+                    StringToCharConverter(writer, name);
+                    foreach (var attribute in attributes) 
+                    {
+                        Variants(attribute.Value, writer, attribute.Name.ToString());
+                    }
+
+                }
+
+                var length = FileSize(writer);
+                RewriteBeginning(writer, attributeOffsets, length, xElements);
+                
+            }
+        }
+
+        public static void RewriteBeginning(BinaryWriter writer, Dictionary<XAttribute, long> offset, long size, List<XElement> xElements) 
+        {
+            writer.Seek(0, SeekOrigin.Begin);
+            StringToCharConverter(writer, "XMB2");
+            writer.Write((int)size);
+            writer.Write((ushort)0);
+            writer.Write((ushort)0);
+            writer.Write(4);
+            foreach (XElement element in xElements)
+            {
+                int count = element.Elements().Count();
+                if (count == 0)
+                {
+                    writer.Write(0);
+                }
+                else
+                {
+                    var children = element.Elements().ToList();
+                    int a = xElements.IndexOf(children[0]);
+                    int b = xElements.IndexOf(element);
+                    writer.Write(12 * (a-b));
+                }
+               
+                if (element.Attributes().Count()!= 0)
+                {
+                    writer.Write((int)((offset[element.Attributes().ToList()[0]])-writer.BaseStream.Position+3));
+                }
+                else
+                {
+                    writer.Write(0);
+                }
+                writer.Write((ushort)count);
+                writer.Write((byte)0);
+                writer.Write((byte)element.Attributes().Count());
+            }
+        }
+
+        public static void Variants(string str, BinaryWriter writer, string hash) 
+        {
+            var hasher = new Fnv1a();
+            var hashed = hasher.GetDigest(hash);
+            var isFloat = float.TryParse(str, out float parsefloat);
+            if (isFloat)
+            {
+                writer.Write((byte)ValueType.Float);
+                writer.Write(hashed);
+                writer.Write(parsefloat);
+            }
+            else
+            {
+                var isInt = int.TryParse(str, out int parseint);
+                if (isInt)
+                {
+                    writer.Write((byte)ValueType.Signed);
+                    writer.Write(hashed);
+                    writer.Write(parseint);
+                }
+                else
+                {
+                    var isDouble = double.TryParse(str, out double parsedouble);
+                    if (isDouble)
+                    {
+                        writer.Write((byte)ValueType.Double);
+                        writer.Write(hashed);
+                        writer.Write(parsedouble);
+                    }
+                    else
+                    {
+                        var isBool = bool.TryParse(str, out bool parsebool);
+                        if (isBool)
+                        {
+                            writer.Write((byte)ValueType.Bool);
+                            writer.Write(hashed);
+                            writer.Write(parsebool);
+                        }
+                        else
+                        {
+                            var isUInt = uint.TryParse(str, out uint parseuint);
+                            if (isUInt)
+                            {
+                                writer.Write((byte)ValueType.Unsigned);
+                                writer.Write(hashed);
+                                writer.Write(parseuint);
+                            }
+                            else
+                            {
+                                var tokens = str.Split(',');
+                                if (tokens.Length>1)
+                                {
+                                    if (tokens.Length == 2) writer.Write((byte)ValueType.Float2);
+                                    else if (tokens.Length == 3) writer.Write((byte)ValueType.Float3);
+                                    else if (tokens.Length == 4) writer.Write((byte)ValueType.Float4);
+                                    writer.Write(hashed);
+                                    for (int i = 0; i < tokens.Length; i++)
+                                    {
+                                        var a = float.Parse(tokens[i]);
+                                        writer.Write(a);
+                                    }
+                                }
+                                else
+                                {
+                                    writer.Write((byte)ValueType.String);
+                                    writer.Write(hashed);
+                                    StringToCharConverter(writer, str);
+                                }
+                            }
+                             
+                        }
+                    }
+                }
+            }
+        }
+
+        public static void StringToCharConverter(BinaryWriter writer, string term)
+        {
+            for (int i = 0; i < term.Length; i++)
+            {
+                writer.Write(term[i]);
+            }
+        }
+
+        static long FileSize(BinaryWriter writer)
+        {
+            return writer.BaseStream.Length;
+        }
+
+    }
+}
